@@ -2,7 +2,7 @@
 
 A browser-based tool that shows what hidden data your photos carry (GPS location, device, timestamps) and lets you remove it before sharing. Everything runs on your device. **No photo is ever uploaded to a server.**
 
-**Live demo:** `https://Adhiraj-shukla.github.io/Photo-Privacy-Scrubber/`
+**Live demo:** https://Adhiraj-shukla.github.io/Photo-Privacy-Scrubber/
 
 ## Why this exists
 
