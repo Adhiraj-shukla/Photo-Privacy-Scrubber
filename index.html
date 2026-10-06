@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photo Privacy Scrubber</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;800&family=Instrument+Sans:wght@400;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/piexifjs/1.0.6/piexif.min.js"></script>
+<style>
+:root{--bg:#eef2f0;--ink:#16211d;--mute:#5d6b65;--card:#fff;--line:#c9d4cf;--warn:#b3261e;--ok:#1b6b4a;--accent:#1b6b4a}
+@media (prefers-color-scheme:dark){:root{--bg:#10171a;--ink:#e6efeb;--mute:#93a39b;--card:#182125;--line:#2b3a40;--warn:#ff8a80;--ok:#6fd3a4;--accent:#6fd3a4}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Instrument Sans",system-ui,sans-serif}
+main{max-width:860px;margin:0 auto;padding:40px 20px 60px}
+h1{font:800 clamp(2rem,6vw,3.2rem)/1.05 Fraunces,Georgia,serif;margin:0 0 8px}
+.sub{color:var(--mute);max-width:56ch;margin:0 0 28px}
+#drop{border:2px dashed var(--line);border-radius:14px;padding:40px 20px;text-align:center;background:var(--card);cursor:pointer}
+#drop.over,#drop:focus-visible{border-color:var(--accent);outline:none;background:color-mix(in srgb,var(--accent) 8%,var(--card))}
+#drop small{display:block;color:var(--mute);margin-top:6px}
+#tools{display:none;margin-top:20px;padding:14px 16px;background:var(--card);border:1px solid var(--line);border-radius:10px}
+#tools.show{display:block}
+#tools label{margin-right:18px;display:inline-block}
+.hint{color:var(--mute);font-size:.85rem;margin:6px 0 0}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+button,a.btn{font:600 .95rem "Instrument Sans",sans-serif;padding:9px 15px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:var(--bg);cursor:pointer;text-decoration:none;display:inline-block}
+button.alt,a.alt{background:transparent;color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button:focus-visible,a.btn:focus-visible,summary:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.item{display:grid;grid-template-columns:110px minmax(0,1fr);gap:16px;margin-top:16px;padding:14px;background:var(--card);border:1px solid var(--line);border-radius:10px}
+@media(max-width:560px){.item{grid-template-columns:1fr}}
+.item img{width:110px;height:110px;object-fit:cover;border-radius:6px}
+.name{font-weight:600;word-break:break-all}
+.risk{padding:8px 11px;border-radius:8px;margin:8px 0;font-size:.92rem;font-weight:600}
+.bad{background:color-mix(in srgb,var(--warn) 14%,transparent);color:var(--warn)}
+.good{background:color-mix(in srgb,var(--ok) 14%,transparent);color:var(--ok)}
+.size{color:var(--mute);font-size:.9rem}
+details{margin-top:8px}summary{cursor:pointer;color:var(--accent);font-weight:600}
+.tablewrap{overflow:auto;max-height:260px;margin-top:6px}
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+td{padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top;word-break:break-word}
+td:first-child{color:var(--mute);width:38%}
+.note{font-size:.85rem;color:var(--mute);margin-top:30px}
+</style>
+</head>
+<body>
+<main>
+<h1>Photo Privacy Scrubber</h1>
+<p class="sub">See what your photos reveal about you, then remove it. Everything runs in your browser. Nothing is uploaded.</p>
+
+<div id="drop" tabindex="0" role="button" aria-label="Choose photos">
+  <b>Drop photos here</b>, click to choose, or paste with Ctrl+V
+  <small>Several files at once are fine. JPEG, PNG, WebP (HEIC can be read but usually not cleaned)</small>
+  <input id="file" type="file" accept="image/*" multiple hidden>
+</div>
+
+<section id="tools" aria-label="Cleaning options">
+  <b>What to keep</b><br>
+  <label><input type="checkbox" id="kd"> Date and time</label>
+  <label><input type="checkbox" id="ks"> Camera settings (exposure, ISO, focal length)</label>
+  <p class="hint">Location and device details are always removed. Keeping anything works for JPEG only; other formats are cleaned completely.</p>
+  <div class="row">
+    <button id="cleanAll">Clean all</button>
+    <button id="zip" class="alt" disabled>Download all as zip</button>
+    <button id="clear" class="alt">Clear list</button>
+  </div>
+</section>
+
+<div id="list" aria-live="polite"></div>
+<p class="note">With nothing kept, each photo is redrawn on a canvas, which drops all metadata but re-encodes the image (JPEG and WebP quality 0.95). With options kept, JPEGs are edited without re-encoding.</p>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const items = []; let nextId = 1;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const size = b => b > 1048576 ? (b/1048576).toFixed(2)+' MB' : Math.max(1,Math.round(b/1024))+' KB';
+const fmt = v => v instanceof Date ? v.toLocaleString() : Array.isArray(v) ? v.join(', ') : (v && typeof v==='object') ? '[data]' : typeof v==='number' && !Number.isInteger(v) ? +v.toFixed(5) : v;
+
+const drop = $('drop'), input = $('file');
+drop.onclick = () => input.click();
+drop.onkeydown = e => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); input.click(); } };
+['dragenter','dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => addFiles(e.dataTransfer.files));
+input.onchange = () => { addFiles(input.files); input.value = ''; };
+document.addEventListener('paste', e => addFiles(e.clipboardData ? e.clipboardData.files : []));
+$('cleanAll').onclick = async () => { for (const it of items) if (!it.clean) await cleanItem(it); };
+$('zip').onclick = makeZip;
+$('clear').onclick = () => { items.forEach(freeItem); items.length = 0; $('list').innerHTML = ''; refresh(); };
+
+async function readMeta(f){
+  try { return await exifr.parse(f, {tiff:true,exif:true,gps:true,ifd1:false,xmp:true,icc:false,iptc:true,translateValues:true,reviveValues:true,mergeOutput:true}) || {}; }
+  catch(e){ return {}; }
+}
+const realKeys = m => Object.keys(m).filter(k => m[k] !== undefined && !(m[k] instanceof Uint8Array));
+
+async function addFiles(files){
+  for (const f of files) {
+    if (!f.type.startsWith('image/')) continue;
+    const it = { id: nextId++, file: f, url: URL.createObjectURL(f), meta: {}, clean: null, status: '' };
+    items.push(it);
+    const el = document.createElement('div'); el.id = 'it'+it.id; el.className = 'item';
+    $('list').appendChild(el);
+    refresh();
+    it.meta = await readMeta(f);
+    draw(it);
+  }
+}
+function freeItem(it){ URL.revokeObjectURL(it.url); if (it.clean) URL.revokeObjectURL(it.clean.url); }
+
+function summary(m){
+  const k = realKeys(m);
+  if (!k.length) return ['good','No metadata found.'];
+  const f = [];
+  if (typeof m.latitude === 'number') f.push('exact location');
+  if (m.Make || m.Model) f.push('device (' + esc([m.Make,m.Model].filter(Boolean).join(' ')) + ')');
+  if (m.DateTimeOriginal || m.CreateDate) f.push('when it was taken');
+  if (m.Software) f.push('software used');
+  return [typeof m.latitude === 'number' ? 'bad' : '', f.length ? 'Reveals: ' + f.join(', ') + '.' : k.length + ' metadata fields found.'];
+}
+const table = m => realKeys(m).map(k => `<tr><td>${esc(k)}</td><td>${esc(String(fmt(m[k])).slice(0,200))}</td></tr>`).join('') || '<tr><td>Nothing found</td></tr>';
+
+function draw(it){
+  const el = $('it'+it.id); if (!el) return;
+  const [cls, text] = summary(it.meta);
+  const m = it.meta, lat = m.latitude, lon = m.longitude;
+  const map = typeof lat === 'number' ? `<a class="btn alt" target="_blank" rel="noopener" href="https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}">View location on map</a>` : '';
+  const c = it.clean;
+  el.innerHTML = `<img src="${it.url}" alt="">
+  <div>
+    <div class="name">${esc(it.file.name)}</div>
+    <div class="risk ${cls}">${text}</div>
+    <details><summary>Show metadata</summary><div class="tablewrap"><table>${table(m)}</table></div></details>
+    ${c ? `<div class="risk ${c.cls}">${esc(c.msg)}</div><div class="size">${size(it.file.size)} → ${size(c.blob.size)}</div>` : ''}
+    <div class="row">
+      ${c ? `<a class="btn" href="${c.url}" download="${esc(c.name)}">Save cleaned photo</a>` : `<button data-act="clean">Remove metadata</button>`}
+      ${map}
+      <button class="alt" data-act="remove">Remove from list</button>
+    </div>
+    ${it.status ? `<div class="hint">${esc(it.status)}</div>` : ''}
+  </div>`;
+  el.querySelector('[data-act=remove]').onclick = () => { freeItem(it); items.splice(items.indexOf(it),1); el.remove(); refresh(); };
+  const cb = el.querySelector('[data-act=clean]'); if (cb) cb.onclick = () => cleanItem(it);
+}
+function refresh(){
+  $('tools').classList.toggle('show', items.length > 0);
+  $('zip').disabled = !items.some(i => i.clean);
+}
+
+function loadImg(url){ return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; }); }
+const readURL = f => new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(f); });
+
+async function canvasClean(it){
+  const img = await loadImg(it.url);
+  const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+  c.getContext('2d').drawImage(img, 0, 0);
+  let type = it.file.type; if (!['image/jpeg','image/png','image/webp'].includes(type)) type = 'image/jpeg';
+  const blob = await new Promise(r => c.toBlob(r, type, 0.95));
+  return { blob, type };
+}
+async function jpegSelective(it, keepDate, keepSet){
+  const data = await readURL(it.file);
+  const ex = piexif.load(data), o = ex['0th'], e = ex['Exif'];
+  const n = {'0th':{}, 'Exif':{}, 'GPS':{}, '1st':{}, 'thumbnail':null};
+  const put = (dst, src, tag) => { if (src[tag] !== undefined) dst[tag] = src[tag]; };
+  put(n['0th'], o, piexif.ImageIFD.Orientation);
+  if (keepDate) { put(n['0th'], o, piexif.ImageIFD.DateTime); put(n.Exif, e, piexif.ExifIFD.DateTimeOriginal); put(n.Exif, e, piexif.ExifIFD.DateTimeDigitized); }
+  if (keepSet) [piexif.ExifIFD.ExposureTime, piexif.ExifIFD.FNumber, piexif.ExifIFD.ISOSpeedRatings, piexif.ExifIFD.FocalLength].forEach(t => put(n.Exif, e, t));
+  const out = piexif.insert(piexif.dump(n), data);
+  return { blob: await (await fetch(out)).blob(), type: 'image/jpeg' };
+}
+
+async function cleanItem(it){
+  const kd = $('kd').checked, ks = $('ks').checked;
+  it.status = 'Cleaning...'; draw(it);
+  try {
+    const r = (it.file.type === 'image/jpeg' && (kd || ks)) ? await jpegSelective(it, kd, ks) : await canvasClean(it);
+    const after = await readMeta(r.blob), keys = realKeys(after);
+    const gps = typeof after.latitude === 'number';
+    let cls = 'good', msg;
+    if (!keys.length) msg = 'Verified: 0 metadata fields left.';
+    else if (gps) { cls = 'bad'; msg = 'Location data is still present. Try cleaning with nothing kept.'; }
+    else { msg = keys.length + ' fields left (' + keys.slice(0,5).join(', ') + (keys.length>5?', ...':'') + '). No location data.'; }
+    const ext = r.type === 'image/png' ? 'png' : r.type === 'image/webp' ? 'webp' : 'jpg';
+    if (it.clean) URL.revokeObjectURL(it.clean.url);
+    it.clean = { blob: r.blob, url: URL.createObjectURL(r.blob), name: it.file.name.replace(/\.[^.]+$/, '') + '-clean.' + ext, cls, msg };
+    it.status = '';
+  } catch(err) { it.status = 'Could not clean this image. HEIC and some formats are not supported by the browser. Convert to JPEG first.'; }
+  draw(it); refresh();
+}
+
+async function makeZip(){
+  const z = new JSZip(), used = new Set();
+  items.filter(i => i.clean).forEach(i => {
+    let n = i.clean.name, k = 1;
+    while (used.has(n)) n = i.clean.name.replace(/(\.[^.]+)$/, '-' + (k++) + '$1');
+    used.add(n); z.file(n, i.clean.blob);
+  });
+  const blob = await z.generateAsync({ type: 'blob' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'cleaned-photos.zip';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+</script>
+</body>
+</html>
